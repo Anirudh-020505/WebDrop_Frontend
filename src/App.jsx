@@ -7,22 +7,21 @@ function App() {
   const socketRef = useRef(null);
   const deviceName = useRef("User" + Math.floor(Math.random() * 1000));
   const pendingFile = useRef(null);
-  const receivers = useRef({}); // transferId → { fileName, totalChunks, chunks[] }
+  const receivers = useRef({});
 
   useEffect(() => {
     socketRef.current = new WebSocket("https://webdrop-backend.onrender.com/ws");
 
     socketRef.current.onopen = () => {
-      socketRef.current.send(
-        JSON.stringify({ type: "join", name: deviceName.current })
-      );
+      socketRef.current.send(JSON.stringify({ type: "join", name: deviceName.current }));
     };
 
     socketRef.current.onmessage = async (event) => {
       const msg = JSON.parse(event.data);
+
       switch (msg.type) {
         case "presence":
-          setClients(msg.clients);
+          setClients(msg.clients.filter((c) => c !== deviceName.current));
           break;
 
         case "chat":
@@ -31,9 +30,7 @@ function App() {
 
         case "file_request":
           if (
-            confirm(
-              `${msg.from} wants to send you "${msg.fileName}" (${msg.fileSize} bytes). Accept?`
-            )
+            confirm(`${msg.from} wants to send you "${msg.fileName}" (${msg.fileSize} bytes). Accept?`)
           ) {
             socketRef.current.send(
               JSON.stringify({
@@ -51,10 +48,7 @@ function App() {
               totalChunks: msg.totalChunks,
               chunks: [],
             };
-            setMessages((m) => [
-              ...m,
-              `Accepted "${msg.fileName}" from ${msg.from}.`,
-            ]);
+            setMessages((m) => [...m, `Accepted "${msg.fileName}" from ${msg.from}.`]);
           } else {
             socketRef.current.send(
               JSON.stringify({
@@ -65,25 +59,16 @@ function App() {
                 transferId: msg.transferId,
               })
             );
-            setMessages((m) => [
-              ...m,
-              `Rejected "${msg.fileName}" from ${msg.from}.`,
-            ]);
+            setMessages((m) => [...m, `Rejected "${msg.fileName}" from ${msg.from}.`]);
           }
           break;
 
         case "file_response":
           if (msg.accepted) {
-            setMessages((m) => [
-              ...m,
-              `${msg.to} is ready—sending "${pendingFile.current.name}"`,
-            ]);
+            setMessages((m) => [...m, `${msg.to} is ready — sending "${pendingFile.current.name}"`]);
             sendFileChunks(msg.to, msg.transferId);
           } else {
-            setMessages((m) => [
-              ...m,
-              `${msg.to} rejected your transfer.`,
-            ]);
+            setMessages((m) => [...m, `${msg.to} rejected your transfer.`]);
             pendingFile.current = null;
           }
           break;
@@ -91,13 +76,20 @@ function App() {
         case "file_chunk": {
           const { transferId, chunkIndex, totalChunks, data } = msg;
           const recv = receivers.current[transferId];
+          if (!recv) {
+            console.warn(`Chunk received for unknown transferId: ${transferId}`);
+            return;
+          }
+
           recv.chunks[chunkIndex] = data;
           setMessages((m) => [
             ...m,
             `Received chunk ${chunkIndex + 1}/${totalChunks} of "${recv.fileName}"`,
           ]);
 
-          if (recv.chunks.filter(Boolean).length === totalChunks) {
+          const receivedCount = recv.chunks.filter(Boolean).length;
+
+          if (receivedCount === totalChunks) {
             const byteArrays = recv.chunks.map((b64) => {
               const binary = atob(b64);
               const arr = new Uint8Array(binary.length);
@@ -109,14 +101,16 @@ function App() {
             const a = document.createElement("a");
             a.href = url;
             a.download = recv.fileName;
-            document.body.appendChild(a);
-            a.click();
-            a.remove();
-            setMessages((m) => [
-              ...m,
-              `Download ready: ${recv.fileName}`,
-            ]);
-            delete receivers.current[transferId];
+
+            // Delay ensures blob is ready and DOM is stable
+            setTimeout(() => {
+              document.body.appendChild(a);
+              a.click();
+              a.remove();
+              URL.revokeObjectURL(url);
+              setMessages((m) => [...m, `Download ready: ${recv.fileName}`]);
+              delete receivers.current[transferId];
+            }, 300);
           }
           break;
         }
@@ -126,14 +120,12 @@ function App() {
       }
     };
 
-    return () => socketRef.current.close();
+    return () => socketRef.current?.close();
   }, []);
 
   const sendMessage = () => {
     if (!input.trim()) return;
-    socketRef.current.send(
-      JSON.stringify({ type: "chat", name: deviceName.current, message: input })
-    );
+    socketRef.current.send(JSON.stringify({ type: "chat", name: deviceName.current, message: input }));
     setMessages((m) => [...m, `You: ${input}`]);
     setInput("");
   };
@@ -143,9 +135,12 @@ function App() {
     fileInput.type = "file";
     fileInput.onchange = () => {
       const file = fileInput.files[0];
+      if (!file) return;
+
       pendingFile.current = file;
       const transferId = `${deviceName.current}-${Date.now()}`;
       const totalChunks = Math.ceil(file.size / (64 * 1024));
+
       socketRef.current.send(
         JSON.stringify({
           type: "file_request",
@@ -157,10 +152,8 @@ function App() {
           totalChunks,
         })
       );
-      setMessages((m) => [
-        ...m,
-        `Requested "${file.name}" to ${recipient}`,
-      ]);
+
+      setMessages((m) => [...m, `Requested "${file.name}" to ${recipient}`]);
     };
     fileInput.click();
   };
@@ -169,6 +162,7 @@ function App() {
     const file = pendingFile.current;
     const chunkSize = 64 * 1024;
     const totalChunks = Math.ceil(file.size / chunkSize);
+
     for (let i = 0; i < totalChunks; i++) {
       const start = i * chunkSize;
       const blob = file.slice(start, start + chunkSize);
@@ -177,6 +171,7 @@ function App() {
       const bytes = new Uint8Array(buffer);
       bytes.forEach((b) => (binary += String.fromCharCode(b)));
       const b64 = btoa(binary);
+
       socketRef.current.send(
         JSON.stringify({
           type: "file_chunk",
@@ -188,11 +183,10 @@ function App() {
           data: b64,
         })
       );
-      setMessages((m) => [
-        ...m,
-        `Sent chunk ${i + 1}/${totalChunks}`,
-      ]);
+
+      setMessages((m) => [...m, `Sent chunk ${i + 1}/${totalChunks}`]);
     }
+
     pendingFile.current = null;
   };
 
