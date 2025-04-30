@@ -10,7 +10,7 @@ function App() {
   const receivers = useRef({}); // transferId → { fileName, totalChunks, chunks[] }
 
   useEffect(() => {
-    socketRef.current = new WebSocket("https://webdrop-backend.onrender.com");
+    socketRef.current = new WebSocket("https://webdrop-backend.onrender.com/ws");
 
     socketRef.current.onopen = () => {
       socketRef.current.send(
