@@ -4,147 +4,200 @@ function App() {
   const [clients, setClients] = useState([]);
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState("");
+  const [isConnected, setIsConnected] = useState(false);
   const socketRef = useRef(null);
   const deviceName = useRef("User" + Math.floor(Math.random() * 1000));
   const pendingFile = useRef(null);
   const receivers = useRef({});
+  const reconnectAttempts = useRef(0);
+  const maxReconnectAttempts = 5;
 
-  useEffect(() => {
-    socketRef.current = new WebSocket(
-      "https://webdrop-backend.onrender.com/ws"
-    );
-
-    socketRef.current.onopen = () => {
-      socketRef.current.send(
-        JSON.stringify({ type: "join", name: deviceName.current })
+  const connectWebSocket = () => {
+    try {
+      socketRef.current = new WebSocket(
+        "wss://webdrop-backend.onrender.com/ws"
       );
-    };
 
-    socketRef.current.onmessage = async (event) => {
-      const msg = JSON.parse(event.data);
+      socketRef.current.onopen = () => {
+        setIsConnected(true);
+        reconnectAttempts.current = 0;
+        socketRef.current.send(
+          JSON.stringify({ type: "join", name: deviceName.current })
+        );
+        setMessages((m) => [...m, "Connected to server"]);
+      };
 
-      switch (msg.type) {
-        case "presence":
-          setClients(msg.clients.filter((c) => c !== deviceName.current));
-          break;
-
-        case "chat":
-          setMessages((m) => [...m, `${msg.name}: ${msg.message}`]);
-          break;
-
-        case "file_request":
-          if (
-            confirm(
-              `${msg.from} wants to send you "${msg.fileName}" (${msg.fileSize} bytes). Accept?`
-            )
-          ) {
-            socketRef.current.send(
-              JSON.stringify({
-                type: "file_response",
-                from: deviceName.current,
-                to: msg.from,
-                accepted: true,
-                transferId: msg.transferId,
-                fileName: msg.fileName,
-                totalChunks: msg.totalChunks,
-              })
-            );
-            receivers.current[msg.transferId] = {
-              fileName: msg.fileName,
-              totalChunks: msg.totalChunks,
-              chunks: [],
-            };
-            setMessages((m) => [
-              ...m,
-              `Accepted "${msg.fileName}" from ${msg.from}.`,
-            ]);
-          } else {
-            socketRef.current.send(
-              JSON.stringify({
-                type: "file_response",
-                from: deviceName.current,
-                to: msg.from,
-                accepted: false,
-                transferId: msg.transferId,
-              })
-            );
-            setMessages((m) => [
-              ...m,
-              `Rejected "${msg.fileName}" from ${msg.from}.`,
-            ]);
-          }
-          break;
-
-        case "file_response":
-          if (msg.accepted) {
-            setMessages((m) => [
-              ...m,
-              `${msg.to} is ready — sending "${pendingFile.current.name}"`,
-            ]);
-            sendFileChunks(msg.to, msg.transferId);
-          } else {
-            setMessages((m) => [...m, `${msg.to} rejected your transfer.`]);
-            pendingFile.current = null;
-          }
-          break;
-
-        case "file_chunk": {
-          const { transferId, chunkIndex, totalChunks, data } = msg;
-          const recv = receivers.current[transferId];
-          if (!recv) {
-            console.warn(
-              `Chunk received for unknown transferId: ${transferId}`
-            );
-            return;
-          }
-
-          recv.chunks[chunkIndex] = data;
+      socketRef.current.onclose = () => {
+        setIsConnected(false);
+        if (reconnectAttempts.current < maxReconnectAttempts) {
+          reconnectAttempts.current += 1;
+          setTimeout(connectWebSocket, 3000);
           setMessages((m) => [
             ...m,
-            `Received chunk ${chunkIndex + 1}/${totalChunks} of "${
-              recv.fileName
-            }"`,
+            `Connection lost. Attempting to reconnect (${reconnectAttempts.current}/${maxReconnectAttempts})...`,
           ]);
-
-          const receivedCount = recv.chunks.filter(Boolean).length;
-
-          if (receivedCount === totalChunks) {
-            const byteArrays = recv.chunks.map((b64) => {
-              const binary = atob(b64);
-              const arr = new Uint8Array(binary.length);
-              for (let i = 0; i < binary.length; i++)
-                arr[i] = binary.charCodeAt(i);
-              return arr;
-            });
-            const blob = new Blob(byteArrays);
-            const url = URL.createObjectURL(blob);
-            const a = document.createElement("a");
-            a.href = url;
-            a.download = recv.fileName;
-
-            // Delay ensures blob is ready and DOM is stable
-            setTimeout(() => {
-              document.body.appendChild(a);
-              a.click();
-              a.remove();
-              URL.revokeObjectURL(url);
-              setMessages((m) => [...m, `Download ready: ${recv.fileName}`]);
-              delete receivers.current[transferId];
-            }, 300);
-          }
-          break;
+        } else {
+          setMessages((m) => [
+            ...m,
+            "Failed to connect to server. Please refresh the page.",
+          ]);
         }
+      };
 
-        default:
-          console.warn("Unhandled message type:", msg);
+      socketRef.current.onerror = (error) => {
+        console.error("WebSocket error:", error);
+        setMessages((m) => [...m, "Connection error occurred"]);
+      };
+
+      socketRef.current.onmessage = async (event) => {
+        const msg = JSON.parse(event.data);
+
+        switch (msg.type) {
+          case "presence":
+            setClients(msg.clients.filter((c) => c !== deviceName.current));
+            break;
+
+          case "chat":
+            setMessages((m) => [...m, `${msg.name}: ${msg.message}`]);
+            break;
+
+          case "file_request":
+            const accept = window.confirm(
+              `${msg.from} wants to send you "${msg.fileName}" (${msg.fileSize} bytes). Accept?`
+            );
+
+            if (accept) {
+              socketRef.current.send(
+                JSON.stringify({
+                  type: "file_response",
+                  from: deviceName.current,
+                  to: msg.from,
+                  accepted: true,
+                  transferId: msg.transferId,
+                  fileName: msg.fileName,
+                  totalChunks: msg.totalChunks,
+                })
+              );
+              receivers.current[msg.transferId] = {
+                fileName: msg.fileName,
+                totalChunks: msg.totalChunks,
+                chunks: [],
+              };
+              setMessages((m) => [
+                ...m,
+                `Accepted "${msg.fileName}" from ${msg.from}.`,
+              ]);
+            } else {
+              socketRef.current.send(
+                JSON.stringify({
+                  type: "file_response",
+                  from: deviceName.current,
+                  to: msg.from,
+                  accepted: false,
+                  transferId: msg.transferId,
+                })
+              );
+              setMessages((m) => [
+                ...m,
+                `Rejected "${msg.fileName}" from ${msg.from}.`,
+              ]);
+            }
+            break;
+
+          case "file_response":
+            if (msg.accepted) {
+              setMessages((m) => [
+                ...m,
+                `${msg.to} accepted your file transfer request. Sending "${pendingFile.current.name}"...`,
+              ]);
+              sendFileChunks(msg.to, msg.transferId);
+            } else {
+              setMessages((m) => [
+                ...m,
+                `${msg.to} rejected your file transfer request.`,
+              ]);
+              pendingFile.current = null;
+            }
+            break;
+
+          case "file_chunk": {
+            const { transferId, chunkIndex, totalChunks, data } = msg;
+            const recv = receivers.current[transferId];
+            if (!recv) {
+              console.warn(
+                `Chunk received for unknown transferId: ${transferId}`
+              );
+              return;
+            }
+
+            recv.chunks[chunkIndex] = data;
+            setMessages((m) => [
+              ...m,
+              `Received chunk ${chunkIndex + 1}/${totalChunks} of "${
+                recv.fileName
+              }"`,
+            ]);
+
+            const receivedCount = recv.chunks.filter(Boolean).length;
+
+            if (receivedCount === totalChunks) {
+              try {
+                const byteArrays = recv.chunks.map((b64) => {
+                  const binary = atob(b64);
+                  const arr = new Uint8Array(binary.length);
+                  for (let i = 0; i < binary.length; i++)
+                    arr[i] = binary.charCodeAt(i);
+                  return arr;
+                });
+                const blob = new Blob(byteArrays);
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement("a");
+                a.href = url;
+                a.download = recv.fileName;
+
+                setTimeout(() => {
+                  document.body.appendChild(a);
+                  a.click();
+                  a.remove();
+                  URL.revokeObjectURL(url);
+                  setMessages((m) => [
+                    ...m,
+                    `Download complete: ${recv.fileName}`,
+                  ]);
+                  delete receivers.current[transferId];
+                }, 300);
+              } catch (error) {
+                console.error("Error processing file:", error);
+                setMessages((m) => [
+                  ...m,
+                  `Error processing file: ${recv.fileName}`,
+                ]);
+              }
+            }
+            break;
+          }
+
+          default:
+            console.warn("Unhandled message type:", msg);
+        }
+      };
+    } catch (error) {
+      console.error("Error connecting to WebSocket:", error);
+      setMessages((m) => [...m, "Error connecting to server"]);
+    }
+  };
+
+  useEffect(() => {
+    connectWebSocket();
+    return () => {
+      if (socketRef.current) {
+        socketRef.current.close();
       }
     };
-
-    return () => socketRef.current?.close();
   }, []);
 
   const sendMessage = () => {
-    if (!input.trim()) return;
+    if (!input.trim() || !isConnected) return;
     socketRef.current.send(
       JSON.stringify({ type: "chat", name: deviceName.current, message: input })
     );
@@ -153,6 +206,11 @@ function App() {
   };
 
   const requestFile = (recipient) => {
+    if (!isConnected) {
+      setMessages((m) => [...m, "Cannot send file: Not connected to server"]);
+      return;
+    }
+
     const fileInput = document.createElement("input");
     fileInput.type = "file";
     fileInput.onchange = () => {
@@ -175,7 +233,10 @@ function App() {
         })
       );
 
-      setMessages((m) => [...m, `Requested "${file.name}" to ${recipient}`]);
+      setMessages((m) => [
+        ...m,
+        `Requesting to send "${file.name}" to ${recipient}`,
+      ]);
     };
     fileInput.click();
   };
@@ -186,27 +247,35 @@ function App() {
     const totalChunks = Math.ceil(file.size / chunkSize);
 
     for (let i = 0; i < totalChunks; i++) {
-      const start = i * chunkSize;
-      const blob = file.slice(start, start + chunkSize);
-      const buffer = await blob.arrayBuffer();
-      let binary = "";
-      const bytes = new Uint8Array(buffer);
-      bytes.forEach((b) => (binary += String.fromCharCode(b)));
-      const b64 = btoa(binary);
+      try {
+        const start = i * chunkSize;
+        const blob = file.slice(start, start + chunkSize);
+        const buffer = await blob.arrayBuffer();
+        let binary = "";
+        const bytes = new Uint8Array(buffer);
+        bytes.forEach((b) => (binary += String.fromCharCode(b)));
+        const b64 = btoa(binary);
 
-      socketRef.current.send(
-        JSON.stringify({
-          type: "file_chunk",
-          from: deviceName.current,
-          to: recipient,
-          transferId,
-          chunkIndex: i,
-          totalChunks,
-          data: b64,
-        })
-      );
+        socketRef.current.send(
+          JSON.stringify({
+            type: "file_chunk",
+            from: deviceName.current,
+            to: recipient,
+            transferId,
+            chunkIndex: i,
+            totalChunks,
+            data: b64,
+          })
+        );
 
-      setMessages((m) => [...m, `Sent chunk ${i + 1}/${totalChunks}`]);
+        setMessages((m) => [...m, `Sent chunk ${i + 1}/${totalChunks}`]);
+      } catch (error) {
+        console.error("Error sending chunk:", error);
+        setMessages((m) => [
+          ...m,
+          `Error sending chunk ${i + 1}/${totalChunks}`,
+        ]);
+      }
     }
 
     pendingFile.current = null;
@@ -215,9 +284,23 @@ function App() {
   return (
     <div className="min-h-screen bg-gradient-to-br from-gray-900 to-gray-800 text-white p-6 font-sans">
       <div className="max-w-4xl mx-auto">
-        <h1 className="text-3xl mb-6 font-bold text-blue-400 flex items-center">
-          <span className="mr-2">📡</span> WebDrop
-        </h1>
+        <div className="flex justify-between items-center mb-6">
+          <h1 className="text-3xl font-bold text-blue-400 flex items-center">
+            <span className="mr-2">📡</span> WebDrop
+          </h1>
+          <div
+            className={`flex items-center ${
+              isConnected ? "text-green-400" : "text-red-400"
+            }`}
+          >
+            <span
+              className={`w-2 h-2 rounded-full mr-2 ${
+                isConnected ? "bg-green-400" : "bg-red-400"
+              }`}
+            ></span>
+            {isConnected ? "Connected" : "Disconnected"}
+          </div>
+        </div>
 
         <div className="mb-6 bg-gray-800 rounded-lg p-4 shadow-lg">
           <h2 className="font-semibold mb-3 text-blue-300">Online Devices</h2>
@@ -227,6 +310,7 @@ function App() {
                 key={name}
                 onClick={() => requestFile(name)}
                 className="px-4 py-2 bg-blue-600 hover:bg-blue-700 rounded-full text-sm transition-colors duration-200 flex items-center"
+                disabled={!isConnected}
               >
                 <span className="w-2 h-2 bg-green-400 rounded-full mr-2"></span>
                 {name}
@@ -246,10 +330,12 @@ function App() {
               placeholder="Type a message…"
               className="flex-1 bg-gray-700 text-white border border-gray-600 px-4 py-2 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
               onKeyPress={(e) => e.key === "Enter" && sendMessage()}
+              disabled={!isConnected}
             />
             <button
               onClick={sendMessage}
-              className="bg-blue-600 hover:bg-blue-700 text-white px-6 py-2 rounded-lg transition-colors duration-200"
+              className="bg-blue-600 hover:bg-blue-700 text-white px-6 py-2 rounded-lg transition-colors duration-200 disabled:opacity-50"
+              disabled={!isConnected}
             >
               Send
             </button>
@@ -263,6 +349,10 @@ function App() {
               className={`mb-2 p-3 rounded-lg ${
                 msg.startsWith("You:")
                   ? "bg-blue-600 ml-auto max-w-[80%]"
+                  : msg.includes("Error") || msg.includes("rejected")
+                  ? "bg-red-900 max-w-[80%]"
+                  : msg.includes("Accepted") || msg.includes("complete")
+                  ? "bg-green-900 max-w-[80%]"
                   : "bg-gray-700 max-w-[80%]"
               }`}
             >
